@@ -22,6 +22,10 @@ import {
   labelSchema,
   rpcContract,
 } from "./src/rpc-contract";
+import {
+  listAllTaskProjectAttachments,
+  resolveTaskProjectForThread,
+} from "./src/tasks-project";
 
 // Re-export for app.tsx / docs consumers that import from the server entry.
 export { LABEL_REALTIME_CHANNEL, labelSchema, rpcContract };
@@ -76,6 +80,13 @@ export default async function plugin(bb: BbPluginApi) {
         "Label assigned to automation-origin threads. Created on first use if missing.",
       default: "automation",
     },
+    autoTagTaskProjects: {
+      type: "boolean",
+      label: "Auto-tag task threads by project name",
+      description:
+        "When a thread is attached to a Tasks task, assign a label named after that Tasks project (for example Labels Pro).",
+      default: true,
+    },
   });
 
   const db = bb.storage.database() as Db & LabelsDb;
@@ -116,11 +127,82 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  async function assignTaskProjectLabel(
+    threadId: string,
+    projectName: string,
+  ): Promise<"assigned" | "already" | "skipped"> {
+    const name = projectName.trim();
+    if (!name) return "skipped";
+    const { label, created } = ensureLabelByName(db, name);
+    if (created) publish(bb, { type: "label-created", label });
+    const result = assignLabel(db, { threadId, labelId: label.id });
+    if (result.assigned) {
+      publish(bb, { type: "assigned", threadId, label });
+      return "assigned";
+    }
+    return "already";
+  }
+
+  async function maybeAutoTagTaskProject(threadId: string): Promise<void> {
+    const cfg = await settings.get();
+    if (!cfg.autoTagTaskProjects) return;
+    const hit = await resolveTaskProjectForThread(bb, threadId);
+    if (!hit) return;
+    await assignTaskProjectLabel(threadId, hit.projectName);
+  }
+
+  function scheduleTaskProjectRetries(threadId: string): void {
+    // Dispatch attaches after thread.created; retry a few times.
+    for (const delayMs of [2_000, 8_000, 20_000]) {
+      const timer = setTimeout(() => {
+        void maybeAutoTagTaskProject(threadId).catch((error) => {
+          const message =
+            error instanceof Error ? error.message : "task-project auto-tag failed";
+          bb.log.warn(`task-project auto-tag failed: ${message}`);
+        });
+      }, delayMs);
+      timer.unref?.();
+    }
+  }
+
   bb.events.on("thread.created", ({ thread }) => {
     void maybeAutoTag(thread).catch((error) => {
       const message =
         error instanceof Error ? error.message : "auto-tag failed";
       bb.log.warn(`automation auto-tag failed: ${message}`);
+    });
+    void maybeAutoTagTaskProject(thread.id).catch((error) => {
+      const message =
+        error instanceof Error ? error.message : "task-project auto-tag failed";
+      bb.log.warn(`task-project auto-tag failed: ${message}`);
+    });
+    scheduleTaskProjectRetries(thread.id);
+  });
+
+  for (const eventName of ["thread.active", "thread.idle"] as const) {
+    bb.events.on(eventName, ({ thread }) => {
+      void maybeAutoTagTaskProject(thread.id).catch((error) => {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "task-project auto-tag failed";
+        bb.log.warn(`task-project auto-tag failed: ${message}`);
+      });
+    });
+  }
+
+  bb.background.schedule("task-project-label-sweep", "*/5 * * * *", () => {
+    void (async () => {
+      const cfg = await settings.get();
+      if (!cfg.autoTagTaskProjects) return;
+      const attachments = await listAllTaskProjectAttachments(bb);
+      for (const hit of attachments) {
+        await assignTaskProjectLabel(hit.threadId, hit.projectName);
+      }
+    })().catch((error) => {
+      const message =
+        error instanceof Error ? error.message : "task-project sweep failed";
+      bb.log.warn(`task-project sweep failed: ${message}`);
     });
   });
 
@@ -293,6 +375,68 @@ export default async function plugin(bb: BbPluginApi) {
         dryRun: input.dryRun,
       };
     },
+    async backfillTaskProjects(input) {
+      const attachments = await listAllTaskProjectAttachments(bb);
+      let scanned = 0;
+      let assigned = 0;
+      let alreadyLabeled = 0;
+      let skipped = 0;
+      const byProject = new Map<
+        string,
+        { projectName: string; assigned: number; alreadyLabeled: number }
+      >();
+      for (const hit of attachments) {
+        scanned += 1;
+        const name = hit.projectName.trim();
+        if (!name) {
+          skipped += 1;
+          continue;
+        }
+        const bucket = byProject.get(name) ?? {
+          projectName: name,
+          assigned: 0,
+          alreadyLabeled: 0,
+        };
+        if (input.dryRun) {
+          const existing = getLabelByName(db, name);
+          const has = existing
+            ? listLabelsForThread(db, hit.threadId).some(
+                (row) => row.id === existing.id,
+              )
+            : false;
+          if (has) {
+            alreadyLabeled += 1;
+            bucket.alreadyLabeled += 1;
+          } else {
+            assigned += 1;
+            bucket.assigned += 1;
+          }
+          byProject.set(name, bucket);
+          continue;
+        }
+        const outcome = await assignTaskProjectLabel(hit.threadId, name);
+        if (outcome === "assigned") {
+          assigned += 1;
+          bucket.assigned += 1;
+        } else if (outcome === "already") {
+          alreadyLabeled += 1;
+          bucket.alreadyLabeled += 1;
+        } else {
+          skipped += 1;
+        }
+        byProject.set(name, bucket);
+      }
+      return {
+        scanned,
+        assigned,
+        alreadyLabeled,
+        skipped,
+        dryRun: input.dryRun,
+        byProject: [...byProject.values()].sort((a, b) =>
+          a.projectName.localeCompare(b.projectName),
+        ),
+      };
+    },
   });
 
   const usage = [
@@ -307,6 +451,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb labels for-thread <thread-id> [--json]",
     "  bb labels mark-read <id-or-name> [--json]",
     "  bb labels backfill-automations [--dry-run] [--project <id>] [--json]",
+    "  bb labels backfill-task-projects [--dry-run] [--json]",
   ].join("\n");
 
   function findLabelArg(token: string): LabelRow | null {
@@ -368,6 +513,12 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Assign the automation label to existing automation threads",
         usage:
           "bb labels backfill-automations [--dry-run] [--project <id>] [--json]",
+      },
+      {
+        name: "backfill-task-projects",
+        summary:
+          "Assign Tasks project-name labels to threads attached to tasks",
+        usage: "bb labels backfill-task-projects [--dry-run] [--json]",
       },
     ],
     async run(argv) {
@@ -620,6 +771,73 @@ export default async function plugin(bb: BbPluginApi) {
             dryRun
               ? `Dry run: would assign ${assignedCount} of ${scanned} automation threads (${alreadyLabeled} already labeled)`
               : `Assigned ${assignedCount} of ${scanned} automation threads (${alreadyLabeled} already labeled)`,
+          );
+        }
+        case "backfill-task-projects": {
+          const attachments = await listAllTaskProjectAttachments(bb);
+          let scanned = 0;
+          let assignedCount = 0;
+          let alreadyLabeled = 0;
+          let skipped = 0;
+          const byProject = new Map<
+            string,
+            { projectName: string; assigned: number; alreadyLabeled: number }
+          >();
+          for (const hit of attachments) {
+            scanned += 1;
+            const name = hit.projectName.trim();
+            if (!name) {
+              skipped += 1;
+              continue;
+            }
+            const bucket = byProject.get(name) ?? {
+              projectName: name,
+              assigned: 0,
+              alreadyLabeled: 0,
+            };
+            if (dryRun) {
+              const existing = getLabelByName(db, name);
+              const has = existing
+                ? listLabelsForThread(db, hit.threadId).some(
+                    (row) => row.id === existing.id,
+                  )
+                : false;
+              if (has) {
+                alreadyLabeled += 1;
+                bucket.alreadyLabeled += 1;
+              } else {
+                assignedCount += 1;
+                bucket.assigned += 1;
+              }
+            } else {
+              const outcome = await assignTaskProjectLabel(hit.threadId, name);
+              if (outcome === "assigned") {
+                assignedCount += 1;
+                bucket.assigned += 1;
+              } else if (outcome === "already") {
+                alreadyLabeled += 1;
+                bucket.alreadyLabeled += 1;
+              } else {
+                skipped += 1;
+              }
+            }
+            byProject.set(name, bucket);
+          }
+          const value = {
+            scanned,
+            assigned: assignedCount,
+            alreadyLabeled,
+            skipped,
+            dryRun,
+            byProject: [...byProject.values()].sort((a, b) =>
+              a.projectName.localeCompare(b.projectName),
+            ),
+          };
+          return reply(
+            value,
+            dryRun
+              ? `Dry run: would assign ${assignedCount} of ${scanned} task threads (${alreadyLabeled} already labeled)`
+              : `Assigned ${assignedCount} of ${scanned} task threads (${alreadyLabeled} already labeled)`,
           );
         }
       }

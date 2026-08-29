@@ -154,6 +154,31 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
   },
+  backfillTaskProjects: {
+    input: z
+      .object({
+        dryRun: z.boolean().default(false),
+      })
+      .strict(),
+    output: z
+      .object({
+        scanned: z.number().int(),
+        assigned: z.number().int(),
+        alreadyLabeled: z.number().int(),
+        skipped: z.number().int(),
+        dryRun: z.boolean(),
+        byProject: z.array(
+          z
+            .object({
+              projectName: z.string(),
+              assigned: z.number().int(),
+              alreadyLabeled: z.number().int(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
 });
 
 export type LabelsRpcContract = typeof rpcContract;

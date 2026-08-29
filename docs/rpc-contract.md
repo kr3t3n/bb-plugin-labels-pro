@@ -47,10 +47,13 @@ or the app `useRpc` hook inside this plugin.
 | `listThreadsByLabel` | `{ labelId? \| labelName? }` | `{ label, threadIds }` |
 | `markAllReadByLabel` | `{ labelId? \| labelName? }` | `{ label, attempted, marked, failed[] }` |
 | `backfillAutomations` | `{ dryRun?, projectId? }` | `{ label, scanned, assigned, alreadyLabeled, dryRun }` |
+| `backfillTaskProjects` | `{ dryRun? }` | `{ scanned, assigned, alreadyLabeled, skipped, dryRun, byProject[] }` |
 
 Notes:
 
 - `assignLabel` / `createLabel` are idempotent by label name (case-insensitive).
 - `assignLabel` / `unassignLabel` are idempotent for a given `(threadId, labelId)`.
 - Do not mutate core bb thread rows for labels; this plugin owns the join table.
+- Task-project auto-tag uses the Tasks project **name** as the label (via
+  `bb.sdk.plugins.callRpc` to plugin `tasks`).
 - Source of truth for schemas: `src/rpc-contract.ts`.

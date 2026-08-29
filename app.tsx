@@ -43,6 +43,8 @@ function LabelsPage() {
   const automationName =
     (settings.values?.automationLabelName as string | undefined) ??
     "automation";
+  const autoTagTasks =
+    (settings.values?.autoTagTaskProjects as boolean | undefined) ?? true;
 
   const add = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -70,8 +72,9 @@ function LabelsPage() {
         </p>
         <p className="mt-2 text-xs text-muted-foreground">
           Automation auto-tag:{" "}
-          {autoTag ? `on → "${automationName}"` : "off"} (Settings → Labels
-          Pro).
+          {autoTag ? `on → "${automationName}"` : "off"}. Task project
+          auto-tag: {autoTagTasks ? "on → project name" : "off"} (Settings →
+          Labels Pro).
         </p>
         <form onSubmit={add} className="mt-4 flex items-center gap-2">
           <Input
@@ -154,9 +157,10 @@ function LabelsPage() {
 function SettingsHint() {
   return (
     <p className="text-sm text-muted-foreground">
-      Use the toggles above for automation auto-tag. CLI:{" "}
-      <code>bb labels backfill-automations</code> labels existing automation
-      threads. Header chips land in a follow-up task (LABL-6).
+      Use the toggles above for automation and task-project auto-tag. CLI:{" "}
+      <code>bb labels backfill-automations</code> and{" "}
+      <code>bb labels backfill-task-projects</code>. Task threads get a label
+      named after their Tasks project (for example Labels Pro).
     </p>
   );
 }

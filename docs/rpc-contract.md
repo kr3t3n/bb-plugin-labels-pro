@@ -1,7 +1,12 @@
 # Labels Pro RPC contract
 
-Stable wire surface for sibling plugins (Sidebar Pro, Notifications Pro, and
+Stable wire surface for sibling plugins ([Sidebar Pro](https://github.com/kr3t3n/bb-plugin-sidebar-pro),
+[Notifications Pro](https://github.com/kr3t3n/bb-plugin-notifications-pro), and
 others). Plugin id: `labels-pro`.
+
+**Source of truth for schemas:** `src/rpc-contract.ts`. Consumers should treat
+Labels Pro as optional: catch RPC 404 / unavailable and hide label UI rather
+than hard-failing install.
 
 Realtime channel: `labels` (constant `LABEL_REALTIME_CHANNEL`).
 
@@ -32,7 +37,8 @@ Payload shapes (best-effort; always refetch after a signal):
 ## Methods
 
 Call via `bb.sdk.plugins.callRpc({ pluginId: "labels-pro", method, input, outputSchema })`
-or the app `useRpc` hook inside this plugin.
+or the app `useRpc` hook inside this plugin. Sibling app code often POSTs
+`/api/v1/plugins/labels-pro/rpc/<method>` (same envelopes).
 
 | Method | Input | Output |
 | --- | --- | --- |
@@ -49,6 +55,14 @@ or the app `useRpc` hook inside this plugin.
 | `backfillAutomations` | `{ dryRun?, projectId? }` | `{ label, scanned, assigned, alreadyLabeled, dryRun }` |
 | `backfillTaskProjects` | `{ dryRun? }` | `{ scanned, assigned, alreadyLabeled, skipped, dryRun, byProject[] }` |
 
+### Consumer map
+
+| Plugin | Uses | Graceful fallback |
+| --- | --- | --- |
+| Sidebar Pro | `listLabels`, `listThreadsByLabel`, realtime `labels` | Hide label filter + row chips; list unchanged |
+| Notifications Pro | `listLabels`, `listThreadsByLabel` (optional bulk probe if present) | Mute-by-label UI shows “unavailable”; alerts still work |
+| Labels Pro UI | full table + `getThreadLabels` / assign / create in header chip | n/a (owner) |
+
 Notes:
 
 - `assignLabel` / `createLabel` are idempotent by label name (case-insensitive).
@@ -56,4 +70,5 @@ Notes:
 - Do not mutate core bb thread rows for labels; this plugin owns the join table.
 - Task-project auto-tag uses the Tasks project **name** as the label (via
   `bb.sdk.plugins.callRpc` to plugin `tasks`).
-- Source of truth for schemas: `src/rpc-contract.ts`.
+- There is **no** required `listAssignments` bulk method today. Consumers that
+  probe for one must fall back to `listThreadsByLabel` per muted/filter label.

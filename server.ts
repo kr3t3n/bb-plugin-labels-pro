@@ -248,14 +248,14 @@ export default async function plugin(bb: BbPluginApi) {
       let assigned = 0;
       let alreadyLabeled = 0;
       for (;;) {
-        const page = await bb.sdk.threads.list({
+        // threads.list returns Thread[] (not { threads }).
+        const threads = await bb.sdk.threads.list({
           projectId: input.projectId,
           originPluginId: AUTOMATIONS_PLUGIN_ID,
           includeHidden: true,
           limit,
           offset,
         });
-        const threads = page.threads ?? [];
         if (threads.length === 0) break;
         for (const thread of threads) {
           scanned += 1;
@@ -569,14 +569,13 @@ export default async function plugin(bb: BbPluginApi) {
           let assignedCount = 0;
           let alreadyLabeled = 0;
           for (;;) {
-            const page = await bb.sdk.threads.list({
+            const threads = await bb.sdk.threads.list({
               projectId,
               originPluginId: AUTOMATIONS_PLUGIN_ID,
               includeHidden: true,
               limit,
               offset,
             });
-            const threads = page.threads ?? [];
             if (threads.length === 0) break;
             for (const thread of threads) {
               scanned += 1;

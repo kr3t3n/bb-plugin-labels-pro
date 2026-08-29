@@ -12,10 +12,9 @@ exposes a stable RPC surface for Sidebar Pro / Notifications Pro.
 - **Filter** — list thread ids for a label (poll or subscribe to realtime)
 - **Mark all read by label** — uses `bb.sdk.threads.markRead` for each linked
   thread (agent-facing bulk attention cleanup)
-- **Automation auto-tag** — on `thread.created`, if `originPluginId ===
-  "automations"`, assign a configurable default label (default `automation`)
-- **Backfill** — `bb labels backfill-automations` for existing automation
-  threads
+- **Thread header editor** — `experimental_threadHeaderAction` chip shows
+  current labels; popover toggles many labels and creates new ones inline
+  (per-pane `threadId` state for split layouts)
 
 ## Install
 
@@ -67,7 +66,8 @@ Realtime channel: `labels`.
 ## Layout
 
 - `server.ts` — settings, SQLite, RPC, CLI, automation `thread.created` hook
-- `app.tsx` — Labels nav panel + settings help section
+- `app.tsx` — Labels nav panel, settings help, thread-header label editor
+- `src/ThreadLabelsChip.tsx` — per-thread header popover (add/remove/create)
 - `src/labels-db.ts` — SQLite helpers (unit-tested)
 - `src/rpc-contract.ts` — shared Zod RPC contract
 - `skills/labels/` — agent skill for `bb labels`

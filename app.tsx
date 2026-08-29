@@ -9,6 +9,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import type { LabelDto, rpcContract } from "./server";
 import { LABEL_REALTIME_CHANNEL } from "./src/rpc-contract";
+import { ThreadLabelsChip } from "./src/ThreadLabelsChip";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
@@ -172,6 +173,12 @@ export default definePluginApp((app) => {
     icon: "./assets/icon.svg",
     path: "labels",
     component: LabelsPage,
+  });
+
+  app.slots.experimental_threadHeaderAction({
+    id: "thread-labels",
+    title: "Thread labels",
+    component: ThreadLabelsChip,
   });
 
   app.slots.settingsSection({

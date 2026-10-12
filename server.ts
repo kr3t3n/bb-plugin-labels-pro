@@ -1,5 +1,6 @@
 // bb-plugin-labels-pro — backend: SQLite labels, RPC, CLI, automation auto-tag.
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import {
   LABEL_MIGRATIONS,
   assignLabel,
@@ -7,6 +8,11 @@ import {
   deleteLabel,
   ensureLabelByName,
   getLabelById,
+  getRevision,
+  listAllAssignments,
+  listSubscribers,
+  removeSubscriber,
+  upsertSubscriber,
   getLabelByName,
   listLabels,
   listLabelsForThread,
@@ -21,6 +27,7 @@ import {
   LABEL_REALTIME_CHANNEL,
   labelSchema,
   rpcContract,
+  type LabelChanges,
 } from "./src/rpc-contract";
 import {
   listAllTaskProjectAttachments,
@@ -49,8 +56,79 @@ type RealtimePayload =
       removed: string[];
     };
 
+// Set by the plugin factory: forwards each write to subscribed plugins.
+let notifySubscribers: ((payload: RealtimePayload) => void) | null = null;
+
 function publish(bb: BbPluginApi, payload: RealtimePayload): void {
   bb.realtime.publish(LABEL_REALTIME_CHANNEL, payload);
+  notifySubscribers?.(payload);
+}
+
+// A burst of writes (an auto-tag, a backfill) reaches subscribers as one call.
+const NOTIFY_DELAY_MS = 250;
+// Past this many threads in one burst, subscribers reload instead.
+const NOTIFY_MAX_THREADS = 500;
+
+/**
+ * Tells subscribed plugins what changed. The bb app only delivers a realtime
+ * signal to the plugin that sent it, so a sibling plugin's frontend never
+ * sees ours. A subscriber's server receives this call and publishes on its
+ * own channel instead.
+ */
+function createChangeNotifier(bb: BbPluginApi, db: LabelsDb) {
+  const threadIds = new Set<string>();
+  let labelsChanged = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const warned = new Set<string>();
+
+  const flush = async () => {
+    timer = null;
+    const subscribers = listSubscribers(db);
+    const reload = labelsChanged || threadIds.size > NOTIFY_MAX_THREADS;
+    const threads: Record<string, string[]> = {};
+    if (!reload) {
+      for (const threadId of threadIds) {
+        threads[threadId] = listLabelsForThread(db, threadId).map(
+          (label) => label.id,
+        );
+      }
+    }
+    threadIds.clear();
+    labelsChanged = false;
+    if (subscribers.length === 0) return;
+    const changes: LabelChanges = {
+      revision: getRevision(db),
+      threads,
+      labelsChanged: reload,
+    };
+    await Promise.all(
+      subscribers.map(async (subscriber) => {
+        try {
+          await bb.sdk.plugins.callRpc({
+            pluginId: subscriber.pluginId,
+            method: subscriber.method,
+            input: changes,
+            outputSchema: z.unknown(),
+          });
+          warned.delete(subscriber.pluginId);
+        } catch (error) {
+          // A disabled subscriber fails every call; say so once per load.
+          if (warned.has(subscriber.pluginId)) return;
+          warned.add(subscriber.pluginId);
+          const message = error instanceof Error ? error.message : "unknown";
+          bb.log.warn(
+            `label change notify to ${subscriber.pluginId} failed: ${message}`,
+          );
+        }
+      }),
+    );
+  };
+
+  return (payload: RealtimePayload) => {
+    if ("threadId" in payload) threadIds.add(payload.threadId);
+    else labelsChanged = true;
+    timer ??= setTimeout(() => void flush(), NOTIFY_DELAY_MS);
+  };
 }
 
 function resolveLabel(
@@ -206,8 +284,35 @@ export default async function plugin(bb: BbPluginApi) {
     });
   });
 
+  notifySubscribers = createChangeNotifier(bb, db);
+
   bb.rpc.register(rpcContract, {
     listLabels: () => ({ labels: listLabels(db) }),
+    listAssignments: (input) => {
+      const revision = getRevision(db);
+      if (input?.sinceRevision === revision) {
+        return { revision, changed: false, labels: null, assignments: null };
+      }
+      return {
+        revision,
+        changed: true,
+        labels: listLabels(db),
+        assignments: listAllAssignments(db),
+      };
+    },
+    subscribeChanges: (input, context) => {
+      const caller = context.experimental_caller;
+      if (caller.kind !== "plugin") {
+        throw new Error("subscribeChanges is for plugins (bb.sdk.plugins.callRpc)");
+      }
+      upsertSubscriber(db, { pluginId: caller.pluginId, method: input.method });
+      return { revision: getRevision(db) };
+    },
+    unsubscribeChanges: (_input, context) => {
+      const caller = context.experimental_caller;
+      if (caller.kind !== "plugin") return { removed: false };
+      return { removed: removeSubscriber(db, caller.pluginId) };
+    },
     createLabel: (input) => {
       const { label, created } = createLabel(db, {
         name: input.name,

@@ -6,7 +6,12 @@ import {
   createLabel,
   deleteLabel,
   ensureLabelByName,
+  getRevision,
+  listAllAssignments,
   listLabelsForThread,
+  listSubscribers,
+  removeSubscriber,
+  upsertSubscriber,
   listThreadIdsByLabel,
   renameLabel,
   setThreadLabels,
@@ -100,5 +105,70 @@ describe("labels db", () => {
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
     expect(first.label.id).toBe(second.label.id);
+  });
+});
+
+describe("revision and bulk reads", () => {
+  let db: LabelsDb & { close: () => void };
+
+  afterEach(() => {
+    db?.close();
+  });
+
+  it("raises the revision on every label and assignment write", () => {
+    db = openDb();
+    const seen = [getRevision(db)];
+    const { label: a } = createLabel(db, { name: "Alpha" });
+    seen.push(getRevision(db));
+    assignLabel(db, { threadId: "thr_1", labelId: a.id });
+    seen.push(getRevision(db));
+    renameLabel(db, { id: a.id, name: "Alpha 2" });
+    seen.push(getRevision(db));
+    unassignLabel(db, { threadId: "thr_1", labelId: a.id });
+    seen.push(getRevision(db));
+    assignLabel(db, { threadId: "thr_2", labelId: a.id });
+    const beforeDelete = getRevision(db);
+    deleteLabel(db, a.id);
+    seen.push(getRevision(db));
+    for (let i = 1; i < seen.length; i += 1) {
+      expect(seen[i]).toBeGreaterThan(seen[i - 1]!);
+    }
+    expect(getRevision(db)).toBeGreaterThan(beforeDelete);
+  });
+
+  it("keeps the revision when nothing is written", () => {
+    db = openDb();
+    const { label } = createLabel(db, { name: "Alpha" });
+    assignLabel(db, { threadId: "thr_1", labelId: label.id });
+    const revision = getRevision(db);
+    listAllAssignments(db);
+    listLabelsForThread(db, "thr_1");
+    expect(getRevision(db)).toBe(revision);
+  });
+
+  it("lists every assignment grouped by label in name order", () => {
+    db = openDb();
+    const { label: zed } = createLabel(db, { name: "Zed" });
+    const { label: alpha } = createLabel(db, { name: "alpha" });
+    assignLabel(db, { threadId: "thr_1", labelId: zed.id });
+    assignLabel(db, { threadId: "thr_2", labelId: alpha.id });
+    assignLabel(db, { threadId: "thr_1", labelId: alpha.id });
+    const groups = listAllAssignments(db);
+    expect(groups.map((group) => group.labelId)).toEqual([alpha.id, zed.id]);
+    expect([...groups[0]!.threadIds].sort()).toEqual(["thr_1", "thr_2"]);
+    expect(groups[1]!.threadIds).toEqual(["thr_1"]);
+  });
+
+  it("stores one subscription per plugin", () => {
+    db = openDb();
+    upsertSubscriber(db, { pluginId: "sidebar-pro", method: "old" });
+    upsertSubscriber(db, { pluginId: "sidebar-pro", method: "labelsChanged" });
+    upsertSubscriber(db, { pluginId: "notifications-pro", method: "onLabels" });
+    expect(listSubscribers(db)).toEqual([
+      { pluginId: "notifications-pro", method: "onLabels" },
+      { pluginId: "sidebar-pro", method: "labelsChanged" },
+    ]);
+    expect(removeSubscriber(db, "sidebar-pro")).toBe(true);
+    expect(removeSubscriber(db, "sidebar-pro")).toBe(false);
   });
 });

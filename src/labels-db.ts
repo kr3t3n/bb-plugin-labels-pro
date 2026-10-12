@@ -56,6 +56,39 @@ export const LABEL_MIGRATIONS = [
     ON thread_labels (label_id, assigned_at DESC)`,
   `CREATE INDEX IF NOT EXISTS thread_labels_thread_idx
     ON thread_labels (thread_id)`,
+  // Every write to labels or assignments raises one stored revision, so a
+  // reader can ask "anything new since revision N?" without reading the data.
+  // Triggers catch every writer (RPC, CLI, backfills, cascades); the value is
+  // stored, so it never restarts from zero and repeats an old number.
+  `CREATE TABLE IF NOT EXISTS labels_meta (
+    key TEXT PRIMARY KEY NOT NULL,
+    value INTEGER NOT NULL
+  )`,
+  `INSERT OR IGNORE INTO labels_meta (key, value) VALUES ('revision', 1)`,
+  `CREATE TRIGGER IF NOT EXISTS labels_insert_revision
+    AFTER INSERT ON labels
+    BEGIN UPDATE labels_meta SET value = value + 1 WHERE key = 'revision'; END`,
+  `CREATE TRIGGER IF NOT EXISTS labels_update_revision
+    AFTER UPDATE ON labels
+    BEGIN UPDATE labels_meta SET value = value + 1 WHERE key = 'revision'; END`,
+  `CREATE TRIGGER IF NOT EXISTS labels_delete_revision
+    AFTER DELETE ON labels
+    BEGIN UPDATE labels_meta SET value = value + 1 WHERE key = 'revision'; END`,
+  `CREATE TRIGGER IF NOT EXISTS thread_labels_insert_revision
+    AFTER INSERT ON thread_labels
+    BEGIN UPDATE labels_meta SET value = value + 1 WHERE key = 'revision'; END`,
+  `CREATE TRIGGER IF NOT EXISTS thread_labels_update_revision
+    AFTER UPDATE ON thread_labels
+    BEGIN UPDATE labels_meta SET value = value + 1 WHERE key = 'revision'; END`,
+  `CREATE TRIGGER IF NOT EXISTS thread_labels_delete_revision
+    AFTER DELETE ON thread_labels
+    BEGIN UPDATE labels_meta SET value = value + 1 WHERE key = 'revision'; END`,
+  // Plugins that asked to hear about label changes (see subscribeChanges).
+  `CREATE TABLE IF NOT EXISTS label_subscribers (
+    plugin_id TEXT PRIMARY KEY NOT NULL,
+    method TEXT NOT NULL,
+    subscribed_at INTEGER NOT NULL
+  )`,
 ];
 
 /** Normalize a display name into a stable slug (lowercase, hyphenated). */
@@ -319,4 +352,63 @@ export function ensureLabelByName(
   name: string,
 ): { label: LabelRow; created: boolean } {
   return createLabel(db, { name });
+}
+
+/** The stored revision; it rises on every label or assignment write. */
+export function getRevision(db: LabelsDb): number {
+  const row = db
+    .prepare(`SELECT value FROM labels_meta WHERE key = 'revision'`)
+    .get() as { value: number } | undefined;
+  return row?.value ?? 0;
+}
+
+/**
+ * Every assignment, grouped by label, in label order and newest first within
+ * a label. One query replaces a listThreadsByLabel call per label.
+ */
+export function listAllAssignments(
+  db: LabelsDb,
+): { labelId: string; threadIds: string[] }[] {
+  const rows = db
+    .prepare(
+      `SELECT tl.label_id, tl.thread_id FROM thread_labels tl
+       INNER JOIN labels l ON l.id = tl.label_id
+       ORDER BY l.name COLLATE NOCASE ASC, l.id ASC, tl.assigned_at DESC`,
+    )
+    .all() as { label_id: string; thread_id: string }[];
+  const groups: { labelId: string; threadIds: string[] }[] = [];
+  for (const row of rows) {
+    const last = groups[groups.length - 1];
+    if (last && last.labelId === row.label_id) last.threadIds.push(row.thread_id);
+    else groups.push({ labelId: row.label_id, threadIds: [row.thread_id] });
+  }
+  return groups;
+}
+
+export type LabelSubscriber = { pluginId: string; method: string };
+
+export function upsertSubscriber(
+  db: LabelsDb,
+  subscriber: LabelSubscriber,
+): void {
+  db.prepare(
+    `INSERT INTO label_subscribers (plugin_id, method, subscribed_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(plugin_id) DO UPDATE SET method = excluded.method`,
+  ).run(subscriber.pluginId, subscriber.method, Date.now());
+}
+
+export function removeSubscriber(db: LabelsDb, pluginId: string): boolean {
+  return (
+    db.prepare(`DELETE FROM label_subscribers WHERE plugin_id = ?`).run(pluginId)
+      .changes > 0
+  );
+}
+
+export function listSubscribers(db: LabelsDb): LabelSubscriber[] {
+  return (
+    db
+      .prepare(`SELECT plugin_id, method FROM label_subscribers ORDER BY plugin_id`)
+      .all() as { plugin_id: string; method: string }[]
+  ).map((row) => ({ pluginId: row.plugin_id, method: row.method }));
 }

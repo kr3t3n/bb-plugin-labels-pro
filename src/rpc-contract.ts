@@ -179,6 +179,60 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
   },
+  /**
+   * Every label and assignment in one call. Pass the revision from the last
+   * call: when nothing changed since, the reply carries no data.
+   */
+  listAssignments: {
+    input: z
+      .object({ sinceRevision: z.number().int().nonnegative().optional() })
+      .strict()
+      .nullable(),
+    output: z
+      .object({
+        revision: z.number().int(),
+        changed: z.boolean(),
+        labels: z.array(labelSchema).nullable(),
+        assignments: z
+          .array(
+            z
+              .object({ labelId: z.string(), threadIds: z.array(z.string()) })
+              .strict(),
+          )
+          .nullable(),
+      })
+      .strict(),
+  },
+  /**
+   * Plugin-to-plugin only (bb.sdk.plugins.callRpc). After label writes, Labels
+   * Pro calls `method` on the calling plugin with a {@link labelChangesSchema}
+   * value. Calling again replaces the method; it is stored, so it survives
+   * restarts.
+   */
+  subscribeChanges: {
+    input: z.object({ method: z.string().trim().min(1).max(80) }).strict(),
+    output: z.object({ revision: z.number().int() }).strict(),
+  },
+  unsubscribeChanges: {
+    input: z.object({}).strict(),
+    output: z.object({ removed: z.boolean() }).strict(),
+  },
 });
 
 export type LabelsRpcContract = typeof rpcContract;
+
+/**
+ * What a subscriber receives. `threads` holds the full current label ids of
+ * every thread whose labels changed, so a subscriber can apply it in any
+ * order. `labelsChanged` means a label itself was created, renamed or
+ * deleted: reload with listAssignments.
+ */
+export const labelChangesSchema = z
+  .object({
+    revision: z.number().int(),
+    threads: z.record(z.string(), z.array(z.string())),
+    labelsChanged: z.boolean(),
+  })
+  .strict();
+
+export type LabelChanges = z.infer<typeof labelChangesSchema>;
